@@ -116,24 +116,26 @@ async function navigateRedditHome(page: Page): Promise<void> {
 export async function assertRedditSession(
   context: BrowserContext,
 ): Promise<void> {
+  // Load the extension-synchronized cookies before the first request. Reddit can
+  // reject an anonymous automated request with HTTP 403, which previously meant
+  // the crawler failed before it ever had a chance to apply the valid session.
+  const hydrated = await applySyncedRedditSession(context);
   const page =
     context.pages()[0] ?? (await context.newPage());
 
   await navigateRedditHome(page);
-  if (!(await redditSessionMissing(page))) return;
-
-  const hydrated = await applySyncedRedditSession(context);
-  if (hydrated) {
-    await navigateRedditHome(page);
-    if (!(await redditSessionMissing(page))) {
+  if (!(await redditSessionMissing(page))) {
+    if (hydrated) {
       console.info(
         '[reddit] Backend browser authenticated from the paired extension session.',
       );
-      return;
     }
+    return;
   }
 
   throw new Error(
-    'REDDIT_SESSION_SYNC_REQUIRED: open Reddit in the paired browser so the extension can synchronize the existing session',
+    hydrated
+      ? 'REDDIT_SESSION_REJECTED: synchronized Reddit session is no longer accepted; open Reddit in the paired browser to refresh it'
+      : 'REDDIT_SESSION_SYNC_REQUIRED: open Reddit in the paired browser so the extension can synchronize the existing session',
   );
 }
