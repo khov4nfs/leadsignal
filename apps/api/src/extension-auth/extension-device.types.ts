@@ -32,9 +32,17 @@ export interface RedditSessionCookieInput {
   sameSite?: 'Strict' | 'Lax' | 'None' | 'no_restriction' | 'lax' | 'strict' | 'unspecified';
 }
 
+export interface RedditBrowserMetadataInput {
+  engine?: 'chromium' | 'firefox';
+  userAgent?: string;
+  language?: string;
+  platform?: string;
+}
+
 export interface SyncRedditSessionInput {
   ticket: string;
   cookies: RedditSessionCookieInput[];
+  browser?: RedditBrowserMetadataInput;
 }
 
 export interface ExtensionBatchSource {
