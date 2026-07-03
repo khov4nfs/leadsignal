@@ -15,14 +15,26 @@ export interface RedditSessionCookie {
   sameSite?: 'Strict' | 'Lax' | 'None';
 }
 
+export interface RedditBrowserMetadata {
+  engine?: 'chromium' | 'firefox';
+  userAgent?: string;
+  language?: string;
+  platform?: string;
+}
+
 interface StoredRedditSession {
-  version: 1;
+  version: 1 | 2;
   workspaceId: string;
   deviceId: string;
   syncedAt: string;
   encrypted: string;
   iv: string;
   authTag: string;
+}
+
+interface RedditSessionPayload {
+  cookies: RedditSessionCookie[];
+  browser?: RedditBrowserMetadata;
 }
 
 export function redditSessionFilePath(): string {
@@ -32,18 +44,70 @@ export function redditSessionFilePath(): string {
   );
 }
 
+function normalizePayload(value: unknown): RedditSessionPayload {
+  if (Array.isArray(value)) {
+    return { cookies: value as RedditSessionCookie[] };
+  }
+
+  if (value && typeof value === 'object') {
+    const candidate = value as Partial<RedditSessionPayload>;
+    return {
+      cookies: Array.isArray(candidate.cookies) ? candidate.cookies : [],
+      browser:
+        candidate.browser && typeof candidate.browser === 'object'
+          ? candidate.browser
+          : undefined,
+    };
+  }
+
+  return { cookies: [] };
+}
+
+async function readStoredSession(
+  crypto: CryptoService,
+): Promise<{
+  record: StoredRedditSession;
+  payload: RedditSessionPayload;
+} | null> {
+  const path = redditSessionFilePath();
+  let record: StoredRedditSession;
+  try {
+    record = JSON.parse(await readFile(path, 'utf8')) as StoredRedditSession;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      console.warn('[reddit-session] synchronized session file not found', {
+        path,
+        cwd: process.cwd(),
+      });
+      return null;
+    }
+    throw error;
+  }
+
+  const decrypted = JSON.parse(
+    crypto.decrypt(record.encrypted, record.iv, record.authTag),
+  ) as unknown;
+  return { record, payload: normalizePayload(decrypted) };
+}
+
 export async function saveRedditSession(
   crypto: CryptoService,
   input: {
     workspaceId: string;
     deviceId: string;
     cookies: RedditSessionCookie[];
+    browser?: RedditBrowserMetadata;
   },
 ): Promise<{ syncedAt: string; cookieCount: number }> {
   const syncedAt = new Date().toISOString();
-  const payload = crypto.encrypt(JSON.stringify(input.cookies));
+  const payload = crypto.encrypt(
+    JSON.stringify({
+      cookies: input.cookies,
+      browser: input.browser,
+    } satisfies RedditSessionPayload),
+  );
   const record: StoredRedditSession = {
-    version: 1,
+    version: 2,
     workspaceId: input.workspaceId,
     deviceId: input.deviceId,
     syncedAt,
@@ -61,9 +125,17 @@ export async function saveRedditSession(
     path,
     workspaceId: input.workspaceId,
     cookieCount: input.cookies.length,
+    browserEngine: input.browser?.engine,
     syncedAt,
   });
   return { syncedAt, cookieCount: input.cookies.length };
+}
+
+export async function readSyncedRedditBrowserMetadata(
+  crypto = new CryptoService(),
+): Promise<RedditBrowserMetadata | undefined> {
+  const session = await readStoredSession(crypto);
+  return session?.payload.browser;
 }
 
 export async function applySyncedRedditSession(
@@ -71,25 +143,12 @@ export async function applySyncedRedditSession(
   crypto = new CryptoService(),
 ): Promise<boolean> {
   const path = redditSessionFilePath();
-  let record: StoredRedditSession;
-  try {
-    record = JSON.parse(await readFile(path, 'utf8')) as StoredRedditSession;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      console.warn('[reddit-session] synchronized session file not found', {
-        path,
-        cwd: process.cwd(),
-      });
-      return false;
-    }
-    throw error;
-  }
+  const session = await readStoredSession(crypto);
+  if (!session) return false;
 
-  const cookies = JSON.parse(
-    crypto.decrypt(record.encrypted, record.iv, record.authTag),
-  ) as RedditSessionCookie[];
+  const { record, payload } = session;
   const nowSeconds = Date.now() / 1000;
-  const usable = cookies
+  const usable = payload.cookies
     .filter((cookie) => cookie.name && cookie.value)
     .filter((cookie) => !cookie.expires || cookie.expires > nowSeconds)
     .map((cookie): Cookie => ({
@@ -116,6 +175,7 @@ export async function applySyncedRedditSession(
     path,
     workspaceId: record.workspaceId,
     cookieCount: usable.length,
+    browserEngine: payload.browser?.engine,
     syncedAt: record.syncedAt,
   });
   return true;
