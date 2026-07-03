@@ -6,9 +6,14 @@ import {
 } from '@nestjs/common';
 import { CryptoService } from '../crypto/crypto.service';
 import { PrismaService } from '../database/prisma.service';
-import { saveRedditSession, type RedditSessionCookie } from '../reddit-public/reddit-session-store';
+import {
+  saveRedditSession,
+  type RedditBrowserMetadata,
+  type RedditSessionCookie,
+} from '../reddit-public/reddit-session-store';
 import { tokenHash } from '../production/security';
 import type {
+  RedditBrowserMetadataInput,
   RedditSessionCookieInput,
   SyncRedditSessionInput,
 } from './extension-device.types';
@@ -25,6 +30,7 @@ export class RedditSessionSyncService {
       throw new UnauthorizedException('ticket is required');
     }
     const cookies = this.validateCookies(input.cookies);
+    const browser = this.validateBrowser(input.browser);
     const ticket = await this.prisma.extensionLoginTicket.findUnique({
       where: { tokenHash: tokenHash(input.ticket.trim()) },
       include: { device: true },
@@ -58,6 +64,7 @@ export class RedditSessionSyncService {
       workspaceId: ticket.device.workspaceId,
       deviceId: ticket.device.id,
       cookies,
+      browser,
     });
 
     await this.prisma.extensionDevice.update({
@@ -68,6 +75,7 @@ export class RedditSessionSyncService {
     return {
       ok: true,
       workspaceId: ticket.device.workspaceId,
+      browserEngine: browser?.engine,
       ...result,
     };
   }
@@ -103,6 +111,30 @@ export class RedditSessionSyncService {
     }
 
     return normalized;
+  }
+
+  private validateBrowser(
+    input: RedditBrowserMetadataInput | undefined,
+  ): RedditBrowserMetadata | undefined {
+    if (!input || typeof input !== 'object') return undefined;
+
+    const userAgent = String(input.userAgent ?? '').trim().slice(0, 512);
+    const inferredEngine = /firefox\//i.test(userAgent)
+      ? 'firefox'
+      : /(?:chrome|chromium|crios|edg)\//i.test(userAgent)
+        ? 'chromium'
+        : undefined;
+    const engine =
+      input.engine === 'firefox' || input.engine === 'chromium'
+        ? input.engine
+        : inferredEngine;
+
+    return {
+      engine,
+      userAgent: userAgent || undefined,
+      language: String(input.language ?? '').trim().slice(0, 64) || undefined,
+      platform: String(input.platform ?? '').trim().slice(0, 128) || undefined,
+    };
   }
 
   private sameSite(value: RedditSessionCookieInput['sameSite']): RedditSessionCookie['sameSite'] {
