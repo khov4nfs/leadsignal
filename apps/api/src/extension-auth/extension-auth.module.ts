@@ -10,7 +10,12 @@ import { RedditSessionSyncService } from './reddit-session-sync.service';
   controllers: [ExtensionAuthController],
   providers: [
     CryptoService,
-    RedditSessionSyncService,
+    {
+      provide: RedditSessionSyncService,
+      useFactory: (prisma: PrismaService, crypto: CryptoService) =>
+        new RedditSessionSyncService(prisma, crypto),
+      inject: [PrismaService, CryptoService],
+    },
     {
       provide: ExtensionAuthService,
       useFactory: (prisma: PrismaService, queue: QueueService) =>

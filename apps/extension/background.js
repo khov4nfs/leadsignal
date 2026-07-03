@@ -54,6 +54,7 @@ async function getState() {
     LS_KEYS.workspaceId,
     LS_KEYS.publicKey,
     'redditSessionSyncedAt',
+    'redditSessionSyncError',
   ]);
   return {
     ok: true,
@@ -64,6 +65,7 @@ async function getState() {
       workspaceId: stored[LS_KEYS.workspaceId],
       hasKey: Boolean(stored[LS_KEYS.publicKey]),
       redditSessionSyncedAt: stored.redditSessionSyncedAt,
+      redditSessionSyncError: stored.redditSessionSyncError,
       version: chrome.runtime.getManifest().version,
       executionMode: 'BACKEND_ONLY',
     },
@@ -90,10 +92,12 @@ async function pairDevice(payload) {
     [LS_KEYS.deviceId]: result.deviceId,
     [LS_KEYS.workspaceId]: result.workspaceId,
   });
-  const redditSession = await syncRedditSession().catch((error) => ({
-    ok: false,
-    error: error.message || String(error),
-  }));
+  const redditSession = await syncRedditSession().catch(async (error) => {
+    const message = error.message || String(error);
+    console.error('[LeadSignal] Reddit session sync failed after pairing', error);
+    await chrome.storage.local.set({ redditSessionSyncError: message });
+    return { ok: false, error: message };
+  });
   return {
     ok: true,
     deviceId: result.deviceId,
@@ -126,31 +130,66 @@ async function createDeviceTicket() {
 
 async function authenticateDevice() {
   const ticket = await createDeviceTicket();
-  return { ok: true, ticket };
+  const redditSession = await syncRedditSession().catch(async (error) => {
+    const message = error.message || String(error);
+    console.error('[LeadSignal] Reddit session sync failed during authentication', error);
+    await chrome.storage.local.set({ redditSessionSyncError: message });
+    return { ok: false, error: message };
+  });
+  return { ok: true, ticket, redditSession };
+}
+
+async function getRedditCookies() {
+  if (!chrome.cookies || typeof chrome.cookies.getAll !== 'function') {
+    throw new Error(
+      'Reddit cookie permission is unavailable. Reload LeadSignal Extension 1.3.2 and accept access to reddit.com.',
+    );
+  }
+
+  const byDomain = await chrome.cookies.getAll({ domain: 'reddit.com' });
+  const byUrl = await chrome.cookies.getAll({ url: 'https://www.reddit.com/' });
+  const unique = new Map();
+  for (const cookie of [...byDomain, ...byUrl]) {
+    unique.set(`${cookie.storeId || '0'}:${cookie.domain}:${cookie.path}:${cookie.name}`, cookie);
+  }
+  return [...unique.values()];
+}
+
+function getBrowserMetadata() {
+  const userAgent = String(globalThis.navigator?.userAgent || '');
+  const engine = /firefox\//i.test(userAgent) ? 'firefox' : 'chromium';
+  return {
+    engine,
+    userAgent,
+    language: String(globalThis.navigator?.language || ''),
+    platform: String(globalThis.navigator?.platform || ''),
+  };
 }
 
 async function syncRedditSession() {
   const stored = await chrome.storage.local.get(LS_KEYS.deviceId);
   if (!stored[LS_KEYS.deviceId]) {
-    return { ok: false, skipped: true, error: 'Extension has not been paired' };
+    const error = 'Extension has not been paired';
+    await chrome.storage.local.set({ redditSessionSyncError: error });
+    return { ok: false, skipped: true, error };
   }
 
-  const cookies = await chrome.cookies.getAll({ domain: '.reddit.com' });
+  const cookies = await getRedditCookies();
   const authenticated = cookies.filter((cookie) => cookie.value && cookie.name);
   if (authenticated.length === 0) {
-    return {
-      ok: false,
-      skipped: true,
-      error: 'No existing Reddit browser session was found',
-    };
+    const error = 'No existing Reddit browser session was found';
+    await chrome.storage.local.set({ redditSessionSyncError: error });
+    return { ok: false, skipped: true, error };
   }
 
   const ticket = await createDeviceTicket();
   const config = await lsGetConfig();
+  const browser = getBrowserMetadata();
   const result = await lsApiFetch(config, '/auth/extension/reddit-session', {
     method: 'POST',
     body: JSON.stringify({
       ticket,
+      browser,
       cookies: authenticated.map((cookie) => ({
         name: cookie.name,
         value: cookie.value,
@@ -164,13 +203,26 @@ async function syncRedditSession() {
     }),
   });
 
-  await chrome.storage.local.set({ redditSessionSyncedAt: result.syncedAt });
+  await chrome.storage.local.set({
+    redditSessionSyncedAt: result.syncedAt,
+    redditSessionSyncError: null,
+  });
+  console.info('[LeadSignal] Reddit session synchronized', {
+    cookieCount: result.cookieCount,
+    browserEngine: result.browserEngine || browser.engine,
+    syncedAt: result.syncedAt,
+  });
   return result;
 }
 
 function scheduleRedditSessionSync(delayMs = 1_000) {
   clearTimeout(redditSyncTimer);
   redditSyncTimer = setTimeout(() => {
-    syncRedditSession().catch(() => undefined);
+    syncRedditSession().catch(async (error) => {
+      console.error('[LeadSignal] Scheduled Reddit session sync failed', error);
+      await chrome.storage.local.set({
+        redditSessionSyncError: error.message || String(error),
+      });
+    });
   }, delayMs);
 }

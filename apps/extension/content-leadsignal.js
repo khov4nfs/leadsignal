@@ -2,6 +2,7 @@ const REQUEST_TYPES = new Map([
   ['LEADSIGNAL_EXTENSION_PING', 'AUTH_PING'],
   ['LEADSIGNAL_EXTENSION_PAIR', 'PAIR_DEVICE'],
   ['LEADSIGNAL_EXTENSION_AUTH', 'AUTHENTICATE'],
+  ['LEADSIGNAL_EXTENSION_REDDIT_SYNC', 'SYNC_REDDIT_SESSION'],
 ]);
 
 window.addEventListener('message', (event) => {
@@ -26,7 +27,9 @@ window.addEventListener('message', (event) => {
           ? 'LEADSIGNAL_EXTENSION_PONG'
           : requestType === 'PAIR_DEVICE'
             ? 'LEADSIGNAL_EXTENSION_PAIR_RESULT'
-            : 'LEADSIGNAL_EXTENSION_AUTH_RESULT';
+            : requestType === 'SYNC_REDDIT_SESSION'
+              ? 'LEADSIGNAL_EXTENSION_REDDIT_SYNC_RESULT'
+              : 'LEADSIGNAL_EXTENSION_AUTH_RESULT';
       window.postMessage(
         {
           type: responseType,

@@ -1,4 +1,8 @@
-import { Injectable, ServiceUnavailableException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import {
   ConnectionStatus,
   LlmProvider,
@@ -10,15 +14,16 @@ import { CryptoService } from '../crypto/crypto.service';
 import { PrismaService } from '../database/prisma.service';
 import { ProductionService } from '../production/production.service';
 import { AnthropicStrategy } from './anthropic.strategy';
+import { GeminiStrategy } from './gemini.strategy';
 import type { LlmStrategy, StrategyConnection } from './llm.types';
 import { StrategyError } from './llm.types';
 import { OpenAiCompatibleStrategy } from './openai-compatible.strategy';
 import { RuleEngineStrategy } from './rule-engine.strategy';
 import { SlotManagerService } from './slot-manager.service';
-import { GeminiStrategy } from './gemini.strategy';
 
 @Injectable()
 export class LlmPoolRouterService {
+  private readonly logger = new Logger(LlmPoolRouterService.name);
   private readonly strategies: LlmStrategy[];
 
   constructor(
@@ -53,8 +58,23 @@ export class LlmPoolRouterService {
     const routes = policy?.routes ?? [];
     const failures: string[] = [];
 
+    if (routes.length === 0) {
+      failures.push('NO_ENABLED_LLM_ROUTES');
+    }
+
     for (const route of routes) {
       if (route.provider === LlmProvider.RULE_ENGINE) {
+        if (failures.length > 0) {
+          this.logger.warn(
+            `Falling back to RULE_ENGINE for post ${post.id}: ${failures.join(', ')}`,
+          );
+        } else if (routes.length === 1) {
+          failures.push('NO_CONFIGURED_PROVIDER_ROUTE');
+          this.logger.warn(
+            `Only RULE_ENGINE is configured for workspace ${workspaceId}`,
+          );
+        }
+
         const strategy = this.strategy(route.provider);
         const result = await strategy.execute(
           { id: 'system', provider: LlmProvider.RULE_ENGINE },
@@ -69,6 +89,7 @@ export class LlmPoolRouterService {
         return {
           correlationId,
           ...result,
+          fallbackFailures: [...failures],
           priority: this.priority(result.output.buyingIntentScore),
         };
       }
@@ -89,6 +110,15 @@ export class LlmPoolRouterService {
         orderBy: [{ healthScore: 'desc' }, { lastUsedAt: 'asc' }],
       });
 
+      if (connections.length === 0) {
+        const failure = `${route.provider}/${route.model}:NO_ELIGIBLE_CONNECTION`;
+        failures.push(failure);
+        this.logger.warn(
+          `Skipping route ${route.provider}/${route.model} for workspace ${workspaceId}: no active eligible connection`,
+        );
+        continue;
+      }
+
       let accountAttempt = 0;
       for (const connection of connections) {
         accountAttempt++;
@@ -104,7 +134,14 @@ export class LlmPoolRouterService {
           route.model,
           limit,
         );
-        if (!lease) continue;
+        if (!lease) {
+          const failure = `${connection.name}/${route.model}:NO_CAPACITY`;
+          failures.push(failure);
+          this.logger.warn(
+            `Skipping ${connection.name}/${route.model}: no concurrency slot available`,
+          );
+          continue;
+        }
 
         try {
           const oauthCredential =
@@ -177,6 +214,7 @@ export class LlmPoolRouterService {
               return {
                 correlationId,
                 ...result,
+                fallbackFailures: [...failures],
                 priority: this.priority(result.output.buyingIntentScore),
               };
             } catch (error) {
@@ -189,8 +227,10 @@ export class LlmPoolRouterService {
                       false,
                       true,
                     );
-              failures.push(
-                `${connection.name}/${route.model}:${normalized.code}`,
+              const failure = `${connection.name}/${route.model}:${normalized.code}`;
+              failures.push(failure);
+              this.logger.warn(
+                `LLM route failed for post ${post.id}: ${failure}; retry ${retry + 1}/${route.maxRetries + 1}`,
               );
               await this.prisma.llmExecution.update({
                 where: { id: execution.id },
@@ -205,7 +245,9 @@ export class LlmPoolRouterService {
             }
           }
         } catch (error) {
-          failures.push(`${connection.name}/${route.model}:${String(error)}`);
+          const failure = `${connection.name}/${route.model}:${String(error)}`;
+          failures.push(failure);
+          this.logger.warn(`LLM connection failed: ${failure}`);
         } finally {
           await this.slots.release(lease);
         }

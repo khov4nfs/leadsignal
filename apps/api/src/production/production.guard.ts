@@ -30,6 +30,17 @@ export function isPublicProductionRoute(method: string, path: string): boolean {
   );
 }
 
+function isExtensionTicketRoute(request: any): boolean {
+  const path = request.url?.split('?')[0] ?? '';
+  const method = String(request.method ?? 'GET').toUpperCase();
+  return (
+    method === 'POST' &&
+    path === '/api/auth/extension/reddit-session' &&
+    typeof request.body?.ticket === 'string' &&
+    request.body.ticket.length > 0
+  );
+}
+
 @Injectable()
 export class ProductionAuthGuard implements CanActivate {
   constructor(private readonly prisma: PrismaService) {}
@@ -40,6 +51,11 @@ export class ProductionAuthGuard implements CanActivate {
     const method = request.method ?? 'GET';
 
     if (isPublicProductionRoute(method, path)) return true;
+
+    // Reddit session synchronization is authenticated by a short-lived,
+    // single-use extension ticket. The endpoint service validates and consumes
+    // the ticket before accepting any browser session data.
+    if (isExtensionTicketRoute(request)) return true;
 
     const authorization = request.headers?.authorization as string | undefined;
     if (!authorization?.startsWith('Bearer ')) {

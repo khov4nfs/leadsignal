@@ -10,6 +10,7 @@ import { exchangeExtensionTicketAction } from './extension-login-actions';
 
 const FLOW_LOCK_KEY = 'ls_extension_login_flow_started_at';
 const FLOW_LOCK_TTL_MS = 15_000;
+const MIN_EXTENSION_VERSION = '1.3.1';
 
 type ExtensionState = {
   installed: boolean;
@@ -17,11 +18,21 @@ type ExtensionState = {
   deviceId?: string;
   workspaceId?: string;
   version?: string;
+  redditSessionSyncedAt?: string;
+  redditSessionSyncError?: string;
 };
 
 type SessionState = {
   authenticated: boolean;
   workspaceId: string | null;
+};
+
+type RedditSessionResult = {
+  ok?: boolean;
+  skipped?: boolean;
+  error?: string;
+  syncedAt?: string;
+  cookieCount?: number;
 };
 
 type ExtensionMessage = {
@@ -33,7 +44,22 @@ type ExtensionMessage = {
   state?: ExtensionState;
   deviceId?: string;
   workspaceId?: string;
+  redditSession?: RedditSessionResult;
+  syncedAt?: string;
+  cookieCount?: number;
 };
+
+function versionAtLeast(current: string | undefined, minimum: string): boolean {
+  if (!current) return false;
+  const left = current.split('.').map((part) => Number(part) || 0);
+  const right = minimum.split('.').map((part) => Number(part) || 0);
+  const length = Math.max(left.length, right.length);
+  for (let index = 0; index < length; index += 1) {
+    const difference = (left[index] ?? 0) - (right[index] ?? 0);
+    if (difference !== 0) return difference > 0;
+  }
+  return true;
+}
 
 function acquireFlowLock() {
   const now = Date.now();
@@ -45,6 +71,41 @@ function acquireFlowLock() {
 
 function releaseFlowLock() {
   sessionStorage.removeItem(FLOW_LOCK_KEY);
+}
+
+function requestRedditSync(): Promise<RedditSessionResult> {
+  return new Promise((resolve) => {
+    const requestId = crypto.randomUUID();
+    const timeout = window.setTimeout(() => {
+      window.removeEventListener('message', onMessage);
+      resolve({ ok: false, error: 'Extension did not respond to Reddit session sync.' });
+    }, 10_000);
+
+    function onMessage(event: MessageEvent<ExtensionMessage>) {
+      if (
+        event.source !== window ||
+        event.origin !== window.location.origin ||
+        event.data?.type !== 'LEADSIGNAL_EXTENSION_REDDIT_SYNC_RESULT' ||
+        event.data.requestId !== requestId
+      ) {
+        return;
+      }
+      window.clearTimeout(timeout);
+      window.removeEventListener('message', onMessage);
+      resolve({
+        ok: event.data.ok,
+        error: event.data.error,
+        syncedAt: event.data.syncedAt,
+        cookieCount: event.data.cookieCount,
+      });
+    }
+
+    window.addEventListener('message', onMessage);
+    window.postMessage(
+      { type: 'LEADSIGNAL_EXTENSION_REDDIT_SYNC', requestId },
+      window.location.origin,
+    );
+  });
 }
 
 export function ExtensionLoginClient({
@@ -113,6 +174,7 @@ export function ExtensionLoginClient({
   function startAutomaticFlow(current: ExtensionState, currentSession: SessionState) {
     if (autoStartedRef.current) return;
     if (!currentSession.authenticated || !currentSession.workspaceId) return;
+    if (!versionAtLeast(current.version, MIN_EXTENSION_VERSION)) return;
     if (!acquireFlowLock()) return;
 
     autoStartedRef.current = true;
@@ -143,6 +205,16 @@ export function ExtensionLoginClient({
         } as ExtensionState;
         setState(nextState);
         setChecking(false);
+
+        if (!versionAtLeast(nextState.version, MIN_EXTENSION_VERSION)) {
+          setError(
+            `LeadSignal Extension ${nextState.version ?? 'không xác định'} đã cũ. Hãy reload extension ${MIN_EXTENSION_VERSION} tại chrome://extensions rồi reload trang này.`,
+          );
+          return;
+        }
+        if (nextState.redditSessionSyncError) {
+          setError(`Reddit session chưa đồng bộ: ${nextState.redditSessionSyncError}`);
+        }
         if (currentSession) startAutomaticFlow(nextState, currentSession);
         return;
       }
@@ -178,6 +250,22 @@ export function ExtensionLoginClient({
           return;
         }
 
+        let redditSession = message.redditSession;
+        if (!redditSession?.ok) {
+          redditSession = await requestRedditSync();
+        }
+        if (!redditSession.ok) {
+          handleFlowError(
+            `Reddit session chưa đồng bộ: ${redditSession.error ?? 'Không đọc được phiên đăng nhập Reddit hiện tại.'}`,
+          );
+          return;
+        }
+
+        setState((current) => ({
+          ...current,
+          redditSessionSyncedAt: redditSession.syncedAt,
+          redditSessionSyncError: undefined,
+        }));
         releaseFlowLock();
         window.location.replace(`/${locale}`);
       }
@@ -276,12 +364,15 @@ export function ExtensionLoginClient({
           <div className="space-y-4">
             <div className="rounded-lg border border-emerald-800 bg-emerald-950/30 p-4 text-sm text-emerald-200">
               {state.paired
-                ? 'Extension đã ghép nối. Đang xác thực thiết bị…'
+                ? 'Extension đã ghép nối. Đang xác thực thiết bị và đồng bộ Reddit session…'
                 : 'Đã phát hiện extension. Đang tự động ghép nối với tài khoản hiện tại…'}
             </div>
+            <p className="text-xs text-slate-500">
+              Extension {state.version ?? 'unknown'} · yêu cầu tối thiểu {MIN_EXTENSION_VERSION}
+            </p>
             <button
               type="button"
-              disabled={busy || cooldown}
+              disabled={busy || cooldown || !versionAtLeast(state.version, MIN_EXTENSION_VERSION)}
               onClick={retry}
               className="w-full rounded-lg bg-violet-600 px-4 py-2 font-medium disabled:opacity-50"
             >

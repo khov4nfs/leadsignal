@@ -1,12 +1,14 @@
 {
   "manifest_version": 3,
   "name": "LeadSignal Extension",
-  "version": "1.3.0",
+  "version": "1.3.2",
   "description": "Device authentication and backend crawler control for LeadSignal.",
   "permissions": ["storage", "cookies"],
   "host_permissions": [
     "http://localhost/*",
     "http://127.0.0.1/*",
+    "https://reddit.com/*",
+    "https://www.reddit.com/*",
     "https://*.reddit.com/*"
   ],
   "optional_host_permissions": ["http://*/*", "https://*/*"],
