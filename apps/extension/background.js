@@ -142,7 +142,7 @@ async function authenticateDevice() {
 async function getRedditCookies() {
   if (!chrome.cookies || typeof chrome.cookies.getAll !== 'function') {
     throw new Error(
-      'Reddit cookie permission is unavailable. Reload LeadSignal Extension 1.3.1 and accept access to reddit.com.',
+      'Reddit cookie permission is unavailable. Reload LeadSignal Extension 1.3.2 and accept access to reddit.com.',
     );
   }
 
@@ -153,6 +153,17 @@ async function getRedditCookies() {
     unique.set(`${cookie.storeId || '0'}:${cookie.domain}:${cookie.path}:${cookie.name}`, cookie);
   }
   return [...unique.values()];
+}
+
+function getBrowserMetadata() {
+  const userAgent = String(globalThis.navigator?.userAgent || '');
+  const engine = /firefox\//i.test(userAgent) ? 'firefox' : 'chromium';
+  return {
+    engine,
+    userAgent,
+    language: String(globalThis.navigator?.language || ''),
+    platform: String(globalThis.navigator?.platform || ''),
+  };
 }
 
 async function syncRedditSession() {
@@ -173,10 +184,12 @@ async function syncRedditSession() {
 
   const ticket = await createDeviceTicket();
   const config = await lsGetConfig();
+  const browser = getBrowserMetadata();
   const result = await lsApiFetch(config, '/auth/extension/reddit-session', {
     method: 'POST',
     body: JSON.stringify({
       ticket,
+      browser,
       cookies: authenticated.map((cookie) => ({
         name: cookie.name,
         value: cookie.value,
@@ -196,6 +209,7 @@ async function syncRedditSession() {
   });
   console.info('[LeadSignal] Reddit session synchronized', {
     cookieCount: result.cookieCount,
+    browserEngine: result.browserEngine || browser.engine,
     syncedAt: result.syncedAt,
   });
   return result;
